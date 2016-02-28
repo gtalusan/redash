@@ -1,0 +1,1386 @@
+From 8a01a09f4816087fee8fc8c0eea551fc0d605b6d Mon Sep 17 00:00:00 2001
+From: George Talusan <george.talusan@gmail.com>
+Date: Thu, 25 Feb 2016 22:56:00 -0500
+Subject: [PATCH 1/2] clean up the maximus64 patch
+
+---
+ .../STM32F2xx/peripherals/platform_mcu_powersave.c |   6 +
+ platforms/AMAZONDASH/AMAZONDASH.mk                 |  66 +++
+ platforms/AMAZONDASH/platform.c                    | 446 +++++++++++++++++++++
+ platforms/AMAZONDASH/platform.h                    | 155 +++++++
+ platforms/AMAZONDASH/platform_config.h             |  93 +++++
+ platforms/AMAZONDASH/wifi_nvram_image.h            |  92 +++++
+ tools/OpenOCD/mem_helper.tcl                       |  22 +
+ tools/OpenOCD/memory.tcl                           | 133 ++++++
+ tools/OpenOCD/mmr_helpers.tcl                      |  72 ++++
+ tools/OpenOCD/stlink-v2-1.cfg                      |  16 +
+ tools/OpenOCD/stlink-v2.cfg                        |  16 +
+ tools/OpenOCD/stm32f2x-flash-app.cfg               |   1 +
+ tools/OpenOCD/stm32f2x.cfg                         |  61 ++-
+ tools/OpenOCD/swj-dp.tcl                           |  34 ++
+ 14 files changed, 1182 insertions(+), 31 deletions(-)
+ create mode 100644 platforms/AMAZONDASH/AMAZONDASH.mk
+ create mode 100644 platforms/AMAZONDASH/platform.c
+ create mode 100644 platforms/AMAZONDASH/platform.h
+ create mode 100644 platforms/AMAZONDASH/platform_config.h
+ create mode 100644 platforms/AMAZONDASH/wifi_nvram_image.h
+ create mode 100644 tools/OpenOCD/mem_helper.tcl
+ create mode 100644 tools/OpenOCD/memory.tcl
+ create mode 100644 tools/OpenOCD/mmr_helpers.tcl
+ create mode 100644 tools/OpenOCD/stlink-v2-1.cfg
+ create mode 100644 tools/OpenOCD/stlink-v2.cfg
+ create mode 100644 tools/OpenOCD/swj-dp.tcl
+
+diff --git a/WICED/platform/MCU/STM32F2xx/peripherals/platform_mcu_powersave.c b/WICED/platform/MCU/STM32F2xx/peripherals/platform_mcu_powersave.c
+index 055d559..8ac68f7 100644
+--- a/WICED/platform/MCU/STM32F2xx/peripherals/platform_mcu_powersave.c
++++ b/WICED/platform/MCU/STM32F2xx/peripherals/platform_mcu_powersave.c
+@@ -111,15 +111,21 @@ platform_result_t platform_mcu_powersave_init( void )
+     /* Allow access to BKP Domain */
+     PWR_BackupAccessCmd(ENABLE);
+ 
++#ifndef AMAZON_DASH
+     /* Enable the LSE OSC */
+     RCC_LSEConfig(RCC_LSE_ON);
+     /* Wait till LSE is ready */
+     while(RCC_GetFlagStatus(RCC_FLAG_LSERDY) == RESET)
+     {
+     }
++#endif
+ 
+     /* Select the RTC Clock Source */
++#ifndef AMAZON_DASH
+     RCC_RTCCLKConfig(RCC_RTCCLKSource_LSE);
++#else
++    RCC_RTCCLKConfig(RCC_RTCCLKSource_LSI);
++#endif
+ 
+     /* Enable the RTC Clock */
+     RCC_RTCCLKCmd(ENABLE);
+diff --git a/platforms/AMAZONDASH/AMAZONDASH.mk b/platforms/AMAZONDASH/AMAZONDASH.mk
+new file mode 100644
+index 0000000..3b2fa01
+--- /dev/null
++++ b/platforms/AMAZONDASH/AMAZONDASH.mk
+@@ -0,0 +1,66 @@
++NAME := Platform_AMAZONDASH
++
++WLAN_CHIP            := 43362
++WLAN_CHIP_REVISION   := A2
++HOST_MCU_FAMILY      := STM32F2xx
++HOST_MCU_VARIANT     := STM32F2x5
++HOST_MCU_PART_NUMBER := STM32F205RGT6
++
++INTERNAL_MEMORY_RESOURCES = $(ALL_RESOURCES)
++
++ifndef BUS
++BUS := SDIO
++endif
++
++VALID_BUSES := SDIO
++
++EXTRA_TARGET_MAKEFILES +=  $(MAKEFILES_PATH)/standard_platform_targets.mk
++
++WIFI_IMAGE_DOWNLOAD := direct
++GLOBAL_DEFINES      += WWD_DIRECT_RESOURCES AMAZON_DASH
++
++# Global includes
++GLOBAL_INCLUDES  := .
++
++# Global defines
++# HSE_VALUE = STM32 crystal frequency = 26MHz (needed to make UART work correctly)
++GLOBAL_DEFINES += HSE_VALUE=26000000
++GLOBAL_DEFINES += $$(if $$(NO_CRLF_STDIO_REPLACEMENT),,CRLF_STDIO_REPLACEMENT)
++
++# Components
++$(NAME)_COMPONENTS += drivers/spi_flash
++
++# Source files
++$(NAME)_SOURCES := platform.c
++
++# WICED APPS
++# APP0 and FILESYSTEM_IMAGE are reserved main app and resources file system
++# FR_APP :=
++# DCT_IMAGE :=
++# OTA_APP :=
++# FILESYSTEM_IMAGE :=
++# WIFI_FIRMWARE :=
++# APP0 :=
++# APP1 :=
++# APP2 :=
++
++# WICED APPS LOOKUP TABLE
++APPS_LUT_HEADER_LOC := 0x0000
++APPS_START_SECTOR := 1
++
++ifneq ($(APP),bootloader)
++ifneq ($(MAIN_COMPONENT_PROCESSING),1)
++$(info +-----------------------------------------------------------------------------------------------------+ )
++$(info | IMPORTANT NOTES                                                                                     | )
++$(info +-----------------------------------------------------------------------------------------------------+ )
++$(info | Wi-Fi MAC Address                                                                                   | )
++$(info |    The target Wi-Fi MAC address is defined in <WICED-SDK>/generated_mac_address.txt                 | )
++$(info |    Ensure each target device has a unique address.                                                  | )
++$(info +-----------------------------------------------------------------------------------------------------+ )
++$(info | MCU & Wi-Fi Power Save                                                                              | )
++$(info |    It is *critical* that applications using WICED Powersave API functions connect an accurate 32kHz | )
++$(info |    reference clock to the sleep clock input pin of the WLAN chip. Please read the WICED Powersave   | )
++$(info |    Application Note located in the documentation directory if you plan to use powersave features.   | )
++$(info +-----------------------------------------------------------------------------------------------------+ )
++endif
++endif
+diff --git a/platforms/AMAZONDASH/platform.c b/platforms/AMAZONDASH/platform.c
+new file mode 100644
+index 0000000..f3c8785
+--- /dev/null
++++ b/platforms/AMAZONDASH/platform.c
+@@ -0,0 +1,446 @@
++#include "platform.h"
++#include "platform_config.h"
++#include "platform_init.h"
++#include "platform_isr.h"
++#include "platform_peripheral.h"
++#include "wwd_platform_common.h"
++#include "wwd_rtos_isr.h"
++#include "wiced_defaults.h"
++#include "wiced_platform.h"
++#include "wwd_rtos.h"
++
++/******************************************************
++ *                      Macros
++ ******************************************************/
++#define PLATFORM_FACTORY_RESET_CHECK_PERIOD     ( 100 )
++#define PLATFORM_FACTORY_RESET_TIMEOUT          ( 5000 )
++
++/******************************************************
++ *                    Constants
++ ******************************************************/
++
++/******************************************************
++ *                   Enumerations
++ ******************************************************/
++
++/******************************************************
++ *                 Type Definitions
++ ******************************************************/
++
++/******************************************************
++ *                    Structures
++ ******************************************************/
++
++/******************************************************
++ *               Static Function Declarations
++ ******************************************************/
++
++/******************************************************
++ *               Variable Definitions
++ ******************************************************/
++
++/* GPIO pin table. Used by WICED/platform/MCU/wiced_platform_common.c */
++
++const platform_gpio_t platform_gpio_pins[] =
++{
++  [WICED_GPIO_0]  = { GPIOB,  0 },
++  [WICED_GPIO_1]  = { GPIOB,  6 }, // RED LED - AMAZON DASH
++  [WICED_GPIO_2]  = { GPIOB,  7 }, // GREEN LED - AMAZON DASH
++  [WICED_GPIO_3]  = { GPIOA,  8 }, // BLUE LED - AMAZON DASH
++  [WICED_GPIO_4]  = { GPIOC,  7 }, // UART6 RX - AMAZON DASH
++  [WICED_GPIO_5]  = { GPIOA,  3 },
++  [WICED_GPIO_6]  = { GPIOA,  4 },
++  [WICED_GPIO_7]  = { GPIOB,  3 },
++  [WICED_GPIO_8]  = { GPIOB,  4 },
++  [WICED_GPIO_9]  = { GPIOB,  5 },
++  [WICED_GPIO_10] = { GPIOB,  8 },
++  [WICED_GPIO_11] = { GPIOA,  1 },
++  [WICED_GPIO_12] = { GPIOC,  2 },
++  [WICED_GPIO_13] = { GPIOB, 14 },
++  [WICED_GPIO_14] = { GPIOC,  6 }, // UART6 TX - AMAZON DASH
++  [WICED_GPIO_16] = { GPIOB,  1 },
++  [WICED_GPIO_18] = { GPIOA, 15 },
++  [WICED_GPIO_19] = { GPIOB, 11 },
++  [WICED_GPIO_20] = { GPIOA, 12 },
++  [WICED_GPIO_21] = { GPIOA, 11 },
++  [WICED_GPIO_22] = { GPIOA,  9 },
++  [WICED_GPIO_23] = { GPIOA, 10 },
++  [WICED_GPIO_28] = { GPIOA, 14 },
++  [WICED_GPIO_29] = { GPIOA,  0 }, // BUTTON - AMAZON DASH Note: This button connected to some PMU chip so it only work when BATT is installed
++  [WICED_GPIO_30] = { GPIOB,  9 },
++  [WICED_GPIO_31] = { GPIOA,  5 },
++  [WICED_GPIO_32] = { GPIOA,  6 },
++  [WICED_GPIO_33] = { GPIOA,  7 },
++  [WICED_GPIO_34] = { GPIOB, 15 },
++  [WICED_GPIO_35] = { GPIOC,  3 },
++  [WICED_GPIO_36] = { GPIOC,  4 },
++
++  //maximus Testing GPIOs
++  [WICED_GPIO_106]  = { GPIOA,  5 },
++  [WICED_GPIO_107]  = { GPIOA,  6 },
++  [WICED_GPIO_108]  = { GPIOA,  7 },
++};
++
++/* ADC peripherals. Used WICED/platform/MCU/wiced_platform_common.c */
++const platform_adc_t platform_adc_peripherals[] =
++{
++    [WICED_ADC_1] = {ADC1, ADC_Channel_3, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_5]},
++    [WICED_ADC_2] = {ADC1, ADC_Channel_4, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_6]},
++    [WICED_ADC_3] = {ADC1, ADC_Channel_1, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_11]},
++    [WICED_ADC_4] = {ADC1, ADC_Channel_12, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_12]},
++    [WICED_ADC_5] = {ADC1, ADC_Channel_9, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_16]},
++    [WICED_ADC_6] = {ADC1, ADC_Channel_0, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_29]},
++    [WICED_ADC_7] = {ADC1, ADC_Channel_5, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_31]},
++    [WICED_ADC_8] = {ADC1, ADC_Channel_6, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_32]},
++    [WICED_ADC_9] = {ADC1, ADC_Channel_13, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_35]},
++    [WICED_ADC_10] = {ADC1, ADC_Channel_14, RCC_APB2Periph_ADC1, 1, &platform_gpio_pins[WICED_GPIO_36]},
++};
++
++/* PWM peripherals. Used by WICED/platform/MCU/wiced_platform_common.c */
++const platform_pwm_t platform_pwm_peripherals[] =
++{
++    [WICED_PWM_1]  = {TIM4, 1, RCC_APB1Periph_TIM4, GPIO_AF_TIM4, &platform_gpio_pins[WICED_GPIO_1]},
++    [WICED_PWM_2]  = {TIM4, 2, RCC_APB1Periph_TIM4, GPIO_AF_TIM4, &platform_gpio_pins[WICED_GPIO_2]},
++#if 0
++    [WICED_PWM_3]  = {TIM2, 2, RCC_APB1Periph_TIM2, GPIO_AF_TIM2, &platform_gpio_pins[WICED_GPIO_2] }, /* or TIM5/Ch2                       */
++    [WICED_PWM_4]  = {TIM2, 3, RCC_APB1Periph_TIM2, GPIO_AF_TIM2, &platform_gpio_pins[WICED_GPIO_3] }, /* or TIM5/Ch3, TIM9/Ch1             */
++    [WICED_PWM_5]  = {TIM2, 4, RCC_APB1Periph_TIM2, GPIO_AF_TIM2, &platform_gpio_pins[WICED_GPIO_4] }, /* or TIM5/Ch4, TIM9/Ch2             */
++    [WICED_PWM_6]  = {TIM2, 1, RCC_APB1Periph_TIM2, GPIO_AF_TIM2, &platform_gpio_pins[WICED_GPIO_6] }, /* or TIM2_CH1_ETR, TIM8/Ch1N        */
++    [WICED_PWM_7]  = {TIM3, 1, RCC_APB1Periph_TIM3, GPIO_AF_TIM3, &platform_gpio_pins[WICED_GPIO_7] }, /* or TIM1_BKIN, TIM8_BKIN, TIM13/Ch1*/
++    [WICED_PWM_8]  = {TIM3, 2, RCC_APB1Periph_TIM3, GPIO_AF_TIM3, &platform_gpio_pins[WICED_GPIO_8] }, /* or TIM8/Ch1N, TIM14/Ch1           */
++    [WICED_PWM_9]  = {TIM5, 2, RCC_APB1Periph_TIM5, GPIO_AF_TIM5, &platform_gpio_pins[WICED_GPIO_2] }, /* or TIM2/Ch2                       */
++#endif
++};
++
++/* SPI peripherals */
++const platform_spi_t platform_spi_peripherals[] =
++{
++    [WICED_SPI_1]  =
++    {
++        .port                  = SPI1,
++        .gpio_af               = GPIO_AF_SPI1,
++        .peripheral_clock_reg  = RCC_APB2Periph_SPI1,
++        .peripheral_clock_func = RCC_APB2PeriphClockCmd,
++        .pin_mosi              = &platform_gpio_pins[WICED_GPIO_108],
++        .pin_miso              = &platform_gpio_pins[WICED_GPIO_107],
++        .pin_clock             = &platform_gpio_pins[WICED_GPIO_106],
++        .tx_dma =
++        {
++            .controller        = DMA2,
++            .stream            = DMA2_Stream5,
++            .channel           = DMA_Channel_3,
++            .irq_vector        = DMA2_Stream5_IRQn,
++            .complete_flags    = DMA_HISR_TCIF5,
++            .error_flags       = ( DMA_HISR_TEIF5 | DMA_HISR_FEIF5 | DMA_HISR_DMEIF5 ),
++        },
++        .rx_dma =
++        {
++            .controller        = DMA2,
++            .stream            = DMA2_Stream0,
++            .channel           = DMA_Channel_3,
++            .irq_vector        = DMA2_Stream0_IRQn,
++            .complete_flags    = DMA_LISR_TCIF0,
++            .error_flags       = ( DMA_LISR_TEIF0 | DMA_LISR_FEIF0 | DMA_LISR_DMEIF0 ),
++        },
++    }
++};
++
++/* UART peripherals and runtime drivers. Used by WICED/platform/MCU/wiced_platform_common.c */
++const platform_uart_t platform_uart_peripherals[] =
++{
++    [WICED_UART_1] =
++    {
++        .port               = USART1,
++        .tx_pin             = &platform_gpio_pins[WICED_GPIO_22],
++        .rx_pin             = &platform_gpio_pins[WICED_GPIO_23],
++        .cts_pin            = NULL,
++        .rts_pin            = NULL,
++        .tx_dma_config =
++        {
++            .controller     = DMA2,
++            .stream         = DMA2_Stream7,
++            .channel        = DMA_Channel_4,
++            .irq_vector     = DMA2_Stream7_IRQn,
++            .complete_flags = DMA_HISR_TCIF7,
++            .error_flags    = ( DMA_HISR_TEIF7 | DMA_HISR_FEIF7 ),
++        },
++        .rx_dma_config =
++        {
++            .controller     = DMA2,
++            .stream         = DMA2_Stream2,
++            .channel        = DMA_Channel_4,
++            .irq_vector     = DMA2_Stream2_IRQn,
++            .complete_flags = DMA_LISR_TCIF2,
++            .error_flags    = ( DMA_LISR_TEIF2 | DMA_LISR_FEIF2 | DMA_LISR_DMEIF2 ),
++        },
++    },
++    //Added UART 6 for Amazon Dash
++    [WICED_UART_6] =
++    {
++        .port               = USART6,
++        .tx_pin             = &platform_gpio_pins[WICED_GPIO_14],
++        .rx_pin             = &platform_gpio_pins[WICED_GPIO_4],
++        .cts_pin            = NULL,
++        .rts_pin            = NULL,
++        .tx_dma_config =
++        {
++            .controller     = DMA2,
++            .stream         = DMA2_Stream6,
++            .channel        = DMA_Channel_5,
++            .irq_vector     = DMA2_Stream6_IRQn,
++            .complete_flags = DMA_HISR_TCIF6,
++            .error_flags    = ( DMA_HISR_TEIF6 | DMA_HISR_FEIF6 ),
++        },
++        .rx_dma_config =
++        {
++            .controller     = DMA2,
++            .stream         = DMA2_Stream1,
++            .channel        = DMA_Channel_5,
++            .irq_vector     = DMA2_Stream1_IRQn,
++            .complete_flags = DMA_LISR_TCIF1,
++            .error_flags    = ( DMA_LISR_TEIF1 | DMA_LISR_FEIF1 | DMA_LISR_DMEIF1 ),
++        },
++    },
++};
++platform_uart_driver_t platform_uart_drivers[WICED_UART_MAX];
++
++
++#if 0
++/* I2C peripherals. Used by WICED/platform/MCU/wiced_platform_common.c */
++const platform_i2c_t platform_i2c_peripherals[] =
++{
++    [WICED_I2C_1] =
++    {
++        .port                    = I2C1,
++        .pin_scl                 = &platform_gpio_pins[WICED_GPIO_1],
++        .pin_sda                 = &platform_gpio_pins[WICED_GPIO_2],
++        .peripheral_clock_reg    = RCC_APB1Periph_I2C1,
++        .tx_dma                  = DMA1,
++        .tx_dma_peripheral_clock = RCC_AHB1Periph_DMA1,
++        .tx_dma_stream           = DMA1_Stream7,
++        .rx_dma_stream           = DMA1_Stream5,
++        .tx_dma_stream_id        = 7,
++        .rx_dma_stream_id        = 5,
++        .tx_dma_channel          = DMA_Channel_1,
++        .rx_dma_channel          = DMA_Channel_1,
++        .gpio_af                 = GPIO_AF_I2C1
++    },
++};
++
++const wiced_spi_device_t wiced_nfc_device =
++{
++    .port        = WICED_SPI_1,
++    .chip_select = WICED_GPIO_5,
++    .speed       = 5000000,
++    .mode        = (SPI_CLOCK_RISING_EDGE | SPI_CLOCK_IDLE_HIGH | SPI_NO_DMA | SPI_MSB_FIRST),
++    .bits        = 8
++};
++#endif
++
++/* SPI flash. Exposed to the applications through include/wiced_platform.h */
++#if defined ( WICED_PLATFORM_INCLUDES_SPI_FLASH )
++const wiced_spi_device_t wiced_spi_flash =
++{
++    .port        = WICED_SPI_1,
++    .chip_select = WICED_SPI_FLASH_CS,
++    .speed       = 5000000,
++    .mode        = (SPI_CLOCK_RISING_EDGE | SPI_CLOCK_IDLE_HIGH | SPI_NO_DMA | SPI_MSB_FIRST),
++    .bits        = 8
++};
++#endif
++
++/* UART standard I/O configuration */
++#ifndef WICED_DISABLE_STDIO
++static platform_uart_config_t stdio_config =
++{
++    .baud_rate    = 115200,
++    .data_width   = DATA_WIDTH_8BIT,
++    .parity       = NO_PARITY,
++    .stop_bits    = STOP_BITS_1,
++    .flow_control = FLOW_CONTROL_DISABLED,
++};
++#endif
++
++/* Wi-Fi control pins. Used by WICED/platform/MCU/wwd_platform_common.c
++ * SDIO: WWD_PIN_BOOTSTRAP[1:0] = b'00
++ * gSPI: WWD_PIN_BOOTSTRAP[1:0] = b'01
++ */
++const platform_gpio_t wifi_control_pins[] =
++{
++    [WWD_PIN_POWER      ] = { GPIOB,  2 }, //Correct pin for the AMAZON DASH - active high
++    [WWD_PIN_RESET      ] = { GPIOB,  5 },
++#if defined ( WICED_USE_WIFI_32K_CLOCK_MCO )
++    [WWD_PIN_32K_CLK    ] = { GPIOA, 13 }, //Put here some random unused pins. 
++#else
++    [WWD_PIN_32K_CLK    ] = { GPIOA, 11 }, //real output pin
++#endif
++    [WWD_PIN_BOOTSTRAP_0] = { GPIOB,  0 },
++    [WWD_PIN_BOOTSTRAP_1] = { GPIOB,  1 },
++};
++
++/* Wi-Fi SDIO bus pins. Used by WICED/platform/STM32F2xx/WWD/wwd_SDIO.c */
++const platform_gpio_t wifi_sdio_pins[] =
++{
++    [WWD_PIN_SDIO_OOB_IRQ] = { GPIOB,  0 },
++    [WWD_PIN_SDIO_CLK    ] = { GPIOC, 12 },
++    [WWD_PIN_SDIO_CMD    ] = { GPIOD,  2 },
++    [WWD_PIN_SDIO_D0     ] = { GPIOC,  8 },
++    [WWD_PIN_SDIO_D1     ] = { GPIOC,  9 },
++    [WWD_PIN_SDIO_D2     ] = { GPIOC, 10 },
++    [WWD_PIN_SDIO_D3     ] = { GPIOC, 11 },
++};
++
++/* Wi-Fi gSPI bus pins. Used by WICED/platform/STM32F2xx/WWD/wwd_SPI.c */
++const platform_gpio_t wifi_spi_pins[] =
++{
++    [WWD_PIN_SPI_IRQ ] = { GPIOC,  9 },
++    [WWD_PIN_SPI_CS  ] = { GPIOC, 11 },
++    [WWD_PIN_SPI_CLK ] = { GPIOB, 13 },
++    [WWD_PIN_SPI_MOSI] = { GPIOB, 15 },
++    [WWD_PIN_SPI_MISO] = { GPIOB, 14 },
++};
++
++/******************************************************
++ *               Function Definitions
++ ******************************************************/
++
++void platform_init_peripheral_irq_priorities( void )
++{
++    /* Interrupt priority setup. Called by WICED/platform/MCU/STM32F2xx/platform_init.c */
++    NVIC_SetPriority( RTC_WKUP_IRQn    ,  1 ); /* RTC Wake-up event   */
++    NVIC_SetPriority( SDIO_IRQn        ,  2 ); /* WLAN SDIO           */
++    NVIC_SetPriority( DMA2_Stream3_IRQn,  3 ); /* WLAN SDIO DMA       */
++    NVIC_SetPriority( DMA1_Stream3_IRQn,  3 ); /* WLAN SPI DMA        */
++    NVIC_SetPriority( USART1_IRQn      ,  6 ); /* WICED_UART_1        */
++    NVIC_SetPriority( USART6_IRQn      ,  6 ); /* WICED_UART_6        */
++    NVIC_SetPriority( DMA2_Stream7_IRQn,  7 ); /* WICED_UART_1 TX DMA */
++    NVIC_SetPriority( DMA2_Stream2_IRQn,  7 ); /* WICED_UART_1 RX DMA */
++    NVIC_SetPriority( DMA2_Stream6_IRQn,  7 ); /* WICED_UART_2 TX DMA */
++    NVIC_SetPriority( DMA2_Stream1_IRQn,  7 ); /* WICED_UART_2 RX DMA */
++    NVIC_SetPriority( EXTI0_IRQn       , 14 ); /* GPIO                */
++    NVIC_SetPriority( EXTI1_IRQn       , 14 ); /* GPIO                */
++    NVIC_SetPriority( EXTI2_IRQn       , 14 ); /* GPIO                */
++    NVIC_SetPriority( EXTI3_IRQn       , 14 ); /* GPIO                */
++    NVIC_SetPriority( EXTI4_IRQn       , 14 ); /* GPIO                */
++    NVIC_SetPriority( EXTI9_5_IRQn     , 14 ); /* GPIO                */
++    NVIC_SetPriority( EXTI15_10_IRQn   , 14 ); /* GPIO                */
++}
++
++void platform_init_external_devices( void )
++{
++    /*  This function initializes the external interfaces for the platform.
++        You could use this to initialize the peripherals you use.
++        Note however that if you initialize alternative functionality of 
++        JTAG and UART pins, you could lock yourself out of being able to flash
++        new firmware.
++    */
++    
++    //patch added to resolve the microseconds delay hang issue.
++    do
++    {
++        // enable DWT hardware and cycle counting
++        CoreDebug->DEMCR = CoreDebug->DEMCR | CoreDebug_DEMCR_TRCENA_Msk;
++        // reset a counter
++        DWT->CYCCNT = 0;
++        // enable the counter
++        DWT->CTRL = (DWT->CTRL | DWT_CTRL_CYCCNTENA_Msk) ;
++    }
++    while(0);
++
++    /* Initialise LEDs and turn off by default */
++    platform_gpio_init( &platform_gpio_pins[WICED_LED1], OUTPUT_OPEN_DRAIN_NO_PULL );
++    platform_gpio_init( &platform_gpio_pins[WICED_LED2], OUTPUT_OPEN_DRAIN_NO_PULL );
++    platform_gpio_init( &platform_gpio_pins[WICED_LED3], OUTPUT_OPEN_DRAIN_NO_PULL );
++
++    // maximus64 - Amazon Dash LED are Active Low
++    platform_gpio_output_high( &platform_gpio_pins[WICED_LED1] );
++    platform_gpio_output_high( &platform_gpio_pins[WICED_LED2] ); 
++    platform_gpio_output_high( &platform_gpio_pins[WICED_LED3] ); 
++
++    /* Initialise buttons to input by default */
++    platform_gpio_init( &platform_gpio_pins[WICED_BUTTON1], INPUT_HIGH_IMPEDANCE );
++
++
++#ifndef WICED_DISABLE_STDIO
++    /* Initialise UART standard I/O */
++    platform_stdio_init( &platform_uart_drivers[STDIO_UART], &platform_uart_peripherals[STDIO_UART], &stdio_config );
++#endif
++}
++
++/* Checks if a factory reset is requested */
++wiced_bool_t platform_check_factory_reset( void )
++{
++    uint32_t factory_reset_counter = 0;
++    int led_state = 0;
++    while (  ( 0 != platform_gpio_input_get( &platform_gpio_pins[ WICED_BUTTON1 ] ) ) //maximus inversed this because button is active high
++           &&( ( factory_reset_counter += PLATFORM_FACTORY_RESET_CHECK_PERIOD ) <= PLATFORM_FACTORY_RESET_TIMEOUT )
++           &&( WICED_SUCCESS == (wiced_result_t)host_rtos_delay_milliseconds( PLATFORM_FACTORY_RESET_CHECK_PERIOD ) )
++          )
++    {
++        /* Factory reset button is being pressed. */
++        /* User Must press it for 5 seconds to ensure it was not accidental */
++        /* Toggle LED every 100ms */
++
++        if ( led_state == 0 )
++        {
++            platform_gpio_output_high( &platform_gpio_pins[ WICED_LED1 ] );
++            led_state = 1;
++        }
++        else
++        {
++            platform_gpio_output_low( &platform_gpio_pins[ WICED_LED1 ] );
++            led_state = 0;
++        }
++        if ( factory_reset_counter == 5000 )
++        {
++            return WICED_TRUE;
++        }
++    }
++    return WICED_FALSE;
++}
++
++/******************************************************
++ *           Interrupt Handler Definitions
++ ******************************************************/
++
++WWD_RTOS_DEFINE_ISR( usart1_irq )
++{
++    platform_uart_irq( &platform_uart_drivers[WICED_UART_1] );
++}
++
++WWD_RTOS_DEFINE_ISR( usart6_irq )
++{
++    platform_uart_irq( &platform_uart_drivers[WICED_UART_6] );
++}
++
++WWD_RTOS_DEFINE_ISR( usart1_tx_dma_irq )
++{
++    platform_uart_tx_dma_irq( &platform_uart_drivers[WICED_UART_1] );
++}
++
++WWD_RTOS_DEFINE_ISR( usart6_tx_dma_irq )
++{
++    platform_uart_tx_dma_irq( &platform_uart_drivers[WICED_UART_6] );
++}
++
++WWD_RTOS_DEFINE_ISR( usart1_rx_dma_irq )
++{
++    platform_uart_rx_dma_irq( &platform_uart_drivers[WICED_UART_1] );
++}
++
++WWD_RTOS_DEFINE_ISR( usart6_rx_dma_irq )
++{
++    platform_uart_rx_dma_irq( &platform_uart_drivers[WICED_UART_6] );
++}
++
++/******************************************************
++ *            Interrupt Handlers Mapping
++ ******************************************************/
++
++/* These DMA assignments can be found STM32F2xx datasheet DMA section */
++WWD_RTOS_MAP_ISR( usart1_irq       , USART1_irq       )
++WWD_RTOS_MAP_ISR( usart1_tx_dma_irq, DMA2_Stream7_irq )
++WWD_RTOS_MAP_ISR( usart1_rx_dma_irq, DMA2_Stream2_irq )
++WWD_RTOS_MAP_ISR( usart6_irq       , USART6_irq       )
++WWD_RTOS_MAP_ISR( usart6_tx_dma_irq, DMA2_Stream6_irq )
++WWD_RTOS_MAP_ISR( usart6_rx_dma_irq, DMA2_Stream1_irq )
+diff --git a/platforms/AMAZONDASH/platform.h b/platforms/AMAZONDASH/platform.h
+new file mode 100644
+index 0000000..57a7fe1
+--- /dev/null
++++ b/platforms/AMAZONDASH/platform.h
+@@ -0,0 +1,155 @@
++
++/** @file
++ * Defines peripherals available for use on Amazon Dash board
++ */
++#pragma once
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++/******************************************************
++ *                   Enumerations
++ ******************************************************/
++
++typedef enum
++{
++    WICED_GPIO_0,
++    WICED_GPIO_1,
++    WICED_GPIO_2,
++    WICED_GPIO_3,
++    WICED_GPIO_4,
++    WICED_GPIO_5,
++    WICED_GPIO_6,
++    WICED_GPIO_7,
++    WICED_GPIO_8,
++    WICED_GPIO_9,
++    WICED_GPIO_10,
++    WICED_GPIO_11,
++    WICED_GPIO_12,
++    WICED_GPIO_13,
++    WICED_GPIO_14,
++    WICED_GPIO_15,
++    WICED_GPIO_16,
++    WICED_GPIO_17,
++    WICED_GPIO_18,
++    WICED_GPIO_19,
++    WICED_GPIO_20,
++    WICED_GPIO_21,
++    WICED_GPIO_22,
++    WICED_GPIO_23,
++    WICED_GPIO_24,
++    WICED_GPIO_25,
++    WICED_GPIO_26,
++    WICED_GPIO_27,
++    WICED_GPIO_28,
++    WICED_GPIO_29,
++    WICED_GPIO_30,
++    WICED_GPIO_31,
++    WICED_GPIO_32,
++    WICED_GPIO_33,
++    WICED_GPIO_34,
++    WICED_GPIO_35,
++    WICED_GPIO_36,
++    WICED_GPIO_37,
++    WICED_GPIO_38,
++    WICED_GPIO_39,
++    WICED_GPIO_40,
++    WICED_GPIO_41,
++    WICED_GPIO_42,
++    WICED_GPIO_43,
++    WICED_GPIO_44,
++    WICED_GPIO_106,
++    WICED_GPIO_107,
++    WICED_GPIO_108,
++    WICED_GPIO_MAX, /* Denotes the total number of GPIO port aliases. Not a valid GPIO alias */
++    WICED_GPIO_32BIT = 0x7FFFFFFF,
++} wiced_gpio_t;
++
++typedef enum
++{
++    WICED_SPI_1,
++    WICED_SPI_MAX, /* Denotes the total number of SPI port aliases. Not a valid SPI alias */
++    WICED_SPI_32BIT = 0x7FFFFFFF,
++} wiced_spi_t;
++
++typedef enum
++{
++    WICED_I2C_1,
++    WICED_I2C_MAX,
++    WICED_I2C_32BIT = 0x7FFFFFFF,
++} wiced_i2c_t;
++
++typedef enum
++{
++    WICED_PWM_1,
++    WICED_PWM_2,
++    WICED_PWM_3,
++    WICED_PWM_4,
++    WICED_PWM_5,
++    WICED_PWM_6,
++    WICED_PWM_7,
++    WICED_PWM_8,
++    WICED_PWM_9,
++    WICED_PWM_MAX, /* Denotes the total number of PWM port aliases. Not a valid PWM alias */
++    WICED_PWM_32BIT = 0x7FFFFFFF,
++} wiced_pwm_t;
++
++typedef enum
++{
++    WICED_ADC_1,
++    WICED_ADC_2,
++    WICED_ADC_3,
++    WICED_ADC_4,
++    WICED_ADC_5,
++    WICED_ADC_6,
++    WICED_ADC_7,
++    WICED_ADC_8,
++    WICED_ADC_9,
++    WICED_ADC_10,
++    WICED_ADC_MAX, /* Denotes the total number of ADC port aliases. Not a valid ADC alias */
++    WICED_ADC_32BIT = 0x7FFFFFFF,
++} wiced_adc_t;
++
++typedef enum
++{
++    WICED_UART_1,
++    WICED_UART_6,
++    WICED_UART_MAX, /* Denotes the total number of UART port aliases. Not a valid UART alias */
++    WICED_UART_32BIT = 0x7FFFFFFF,
++} wiced_uart_t;
++
++/******************************************************
++ *                    Constants
++ ******************************************************/
++
++/* UART port used for standard I/O */
++#define STDIO_UART ( WICED_UART_6 )
++
++//#define WICED_PLATFORM_INCLUDES_SPI_FLASH
++#define WICED_SPI_FLASH_CS ( WICED_GPIO_6 )
++
++/* Components connected to external I/Os */
++#define WICED_LED1         ( WICED_GPIO_1 )
++#define WICED_LED2         ( WICED_GPIO_2 )
++#define WICED_LED3         ( WICED_GPIO_3 )
++
++
++#define WICED_BUTTON1      ( WICED_GPIO_29 )
++
++/* I/O connection <-> Peripheral Connections */
++#define WICED_LED1_JOINS_PWM        ( WICED_PWM_1 )
++#define WICED_LED2_JOINS_PWM        ( WICED_PWM_2 )
++
++/*  Bootloader LED D1 */
++#define BOOTLOADER_LED_GPIO      ( WICED_LED1 )
++#define BOOTLOADER_LED_ON_STATE  ( WICED_ACTIVE_LOW )
++
++ /* Bootloader Button S1 */
++#define BOOTLOADER_BUTTON_GPIO           ( WICED_BUTTON1 )
++#define BOOTLOADER_BUTTON_PRESSED_STATE  ( WICED_ACTIVE_HIGH )
++
++#ifdef __cplusplus
++} /*extern "C" */
++#endif
+diff --git a/platforms/AMAZONDASH/platform_config.h b/platforms/AMAZONDASH/platform_config.h
+new file mode 100644
+index 0000000..429a843
+--- /dev/null
++++ b/platforms/AMAZONDASH/platform_config.h
+@@ -0,0 +1,93 @@
++/** @file
++ * Defines internal configuration of the Amazon Dash
++ */
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++/******************************************************
++ *  MCU Constants and Options
++ *
++ *  NOTE: The clock configuration utility from ST is used to calculate these values
++ *        http://www.st.com/st-web-ui/static/active/en/st_prod_software_internet/resource/technical/software/utility/stsw-stm32090.zip
++ ******************************************************/
++
++/*  CPU clock : 120 MHz */
++#define CPU_CLOCK_HZ         ( 120000000 )
++
++/*  Use external crystal */
++#define HSE_SOURCE           ( RCC_HSE_ON )
++
++/*  AHB clock  : System clock */
++#define AHB_CLOCK_DIVIDER    ( RCC_SYSCLK_Div1 )
++
++/*  APB1 clock : AHB clock / 4 */
++#define APB1_CLOCK_DIVIDER   ( RCC_HCLK_Div4 )
++
++/*  APB2 clock : AHB clock / 2 */
++#define APB2_CLOCK_DIVIDER   ( RCC_HCLK_Div2 )
++
++/*  PLL source : external crystal */
++#define PLL_SOURCE           ( RCC_PLLSource_HSE )
++
++/*  PLLM : 26 */
++#define PLL_M_CONSTANT       ( 26 )
++
++/*  PLLN : 240 */
++#define PLL_N_CONSTANT       ( 240 )
++
++/*  PLLP : 2 */
++#define PLL_P_CONSTANT       ( 2 )
++
++/*  PLLQ : 5 */
++#define PPL_Q_CONSTANT       ( 5 )
++
++/*  System clock source  : PLL clock */
++#define SYSTEM_CLOCK_SOURCE  ( RCC_SYSCLKSource_PLLCLK )
++
++/*  SysTick clock source : AHB clock  */
++#define SYSTICK_CLOCK_SOURCE ( SysTick_CLKSource_HCLK )
++
++/*  Internal flash wait state : 3 cycles */
++#define INT_FLASH_WAIT_STATE ( FLASH_Latency_3 )
++
++/*  Internal flash voltage range : 2.7 to 3.6V */
++#define PLATFORM_STM32_VOLTAGE_2V7_TO_3V6
++
++
++/******************************************************
++ *  Wi-Fi Options
++ ******************************************************/
++
++/*  GPIO pins are used to bootstrap Wi-Fi to SDIO or gSPI mode */
++#define WICED_WIFI_USE_GPIO_FOR_BOOTSTRAP_0
++#define WICED_WIFI_USE_GPIO_FOR_BOOTSTRAP_1
++
++/*  Wi-Fi GPIO0 pin is used for out-of-band interrupt */
++#define WICED_WIFI_OOB_IRQ_GPIO_PIN  ( 0 )
++
++/*  Wi-Fi power pin is present */
++#define WICED_USE_WIFI_POWER_PIN
++
++/* Wi-Fi power pin is active high AMAZON DASH*/
++#define WICED_USE_WIFI_POWER_PIN_ACTIVE_HIGH
++
++
++/*  Wi-Fi reset pin is present */
++#define WICED_USE_WIFI_RESET_PIN
++
++/*  WLAN Powersave Clock Source
++ *  The WLAN sleep clock can be driven from one of two sources:
++ *  1. MCO (MCU Clock Output) - default
++ *  2. WLAN 32K internal oscillator (30% inaccuracy)
++ *     - Comment the following directive : WICED_USE_WIFI_32K_CLOCK_MCO
++ */
++#define WICED_USE_WIFI_32K_CLOCK_MCO
++
++/*  OTA */
++//#define PLATFORM_HAS_OTA
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
+diff --git a/platforms/AMAZONDASH/wifi_nvram_image.h b/platforms/AMAZONDASH/wifi_nvram_image.h
+new file mode 100644
+index 0000000..7f60c75
+--- /dev/null
++++ b/platforms/AMAZONDASH/wifi_nvram_image.h
+@@ -0,0 +1,92 @@
++/** @file
++ *  NVRAM variables which define BCM43362 Parameters for the
++ *  USI module used on the Amazon Dash board
++ *
++ */
++
++#ifndef INCLUDED_NVRAM_IMAGE_H_
++#define INCLUDED_NVRAM_IMAGE_H_
++
++#include <string.h>
++#include <stdint.h>
++#include "../generated_mac_address.txt"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Character array of NVRAM image
++ */
++
++static const char wifi_nvram_image[] =
++        "manfid=0x2d0"                                                       "\x00"
++        "prodid=0x492"                                                       "\x00"
++        "vendid=0x14e4"                                                      "\x00"
++        "devid=0x4343"                                                       "\x00"
++        "boardtype=0x05a0"                                                   "\x00"
++        "boardrev=0x1301"                                                    "\x00" /*Board Revision is REV3.1*/
++        "boardnum=777"                                                       "\x00"
++        "xtalfreq=26000"                                                     "\x00"
++        "boardflags=0xa00"                                                   "\x00"
++        "sromrev=3"                                                          "\x00"
++        "wl0id=0x431b"                                                       "\x00"
++        NVRAM_GENERATED_MAC_ADDRESS                                          "\x00"
++        "aa2g=3"                                                             "\x00"
++        "ag0=2"                                                              "\x00"
++        "maxp2ga0=68"                                                        "\x00"
++        "ofdm2gpo=0x44444444"                                                "\x00"
++        "mcs2gpo0=0x3333"                                                    "\x00"
++        "mcs2gpo1=0x6333"                                                    "\x00"
++        "pa0maxpwr=80"                                                       "\x00"
++        "pa0b0=0x133E"                                                       "\x00"
++        "pa0b1=0xFDBA"                                                       "\x00"
++        "pa0b2=0xFF53"                                                       "\x00"
++        "pa0itssit=62"                                                       "\x00"
++        "pa1itssit=62"                                                       "\x00"
++        "temp_based_dutycy_en=1"                                             "\x00"
++        "tx_duty_cycle_ofdm=100"                                             "\x00"
++        "tx_duty_cycle_cck=100"                                              "\x00"
++        "tx_ofdm_temp_0=115"                                                 "\x00"
++        "tx_cck_temp_0=115"                                                  "\x00"
++        "tx_ofdm_dutycy_0=40"                                                "\x00"
++        "tx_cck_dutycy_0=40"                                                 "\x00"
++        "tx_ofdm_temp_1=255"                                                 "\x00"
++        "tx_cck_temp_1=255"                                                  "\x00"
++        "tx_ofdm_dutycy_1=40"                                                "\x00"
++        "tx_cck_dutycy_1=40"                                                 "\x00"
++        "tx_tone_power_index=40"                                             "\x00"
++        "tx_tone_power_index.fab.3=48"                                       "\x00"
++        "cckPwrOffset=0"                                                     "\x00"
++        "ccode=0"                                                            "\x00"
++        "rssismf2g=0xa"                                                      "\x00"
++        "rssismc2g=0x3"                                                      "\x00"
++        "rssisav2g=0x7"                                                      "\x00"
++        "triso2g=0"                                                          "\x00"
++        "noise_cal_enable_2g=0"                                              "\x00"
++        "noise_cal_po_2g=0"                                                  "\x00"
++        "noise_cal_po_2g.fab.3=-2"                                           "\x00"
++        "swctrlmap_2g=0x050c050c,0x030a030a,0x030a030a,0x0,0x1ff"            "\x00"
++        "temp_add=29767"                                                     "\x00"
++        "temp_mult=425"                                                      "\x00"
++        "temp_q=10"                                                          "\x00"
++        "initxidx2g=45"                                                      "\x00"
++        "tssitime=1"                                                         "\x00"
++        "rfreg033=0x19"                                                      "\x00"
++        "rfreg033_cck=0x1f"                                                  "\x00"
++        "cckPwrIdxCorr=-8"                                                   "\x00"
++        "spuravoid_enable2g=1"                                               "\x00"
++        "edonthd=-70"                                                        "\x00"
++        "edoffthd=-76"                                                       "\x00"
++        "\x00\x00";
++
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
++
++#else /* ifndef INCLUDED_NVRAM_IMAGE_H_ */
++
++#error Wi-Fi NVRAM image included twice
++
++#endif /* ifndef INCLUDED_NVRAM_IMAGE_H_ */
+diff --git a/tools/OpenOCD/mem_helper.tcl b/tools/OpenOCD/mem_helper.tcl
+new file mode 100644
+index 0000000..a3d92cb
+--- /dev/null
++++ b/tools/OpenOCD/mem_helper.tcl
+@@ -0,0 +1,22 @@
++# Helper for common memory read/modify/write procedures
++
++# mrw: "memory read word", returns value of $reg
++proc mrw {reg} {
++	set value ""
++	mem2array value 32 $reg 1
++	return $value(0)
++}
++
++add_usage_text mrw "address"
++add_help_text mrw "Returns value of word in memory."
++
++# mmw: "memory modify word", updates value of $reg
++#       $reg <== ((value & ~$clearbits) | $setbits)
++proc mmw {reg setbits clearbits} {
++	set old [mrw $reg]
++	set new [expr ($old & ~$clearbits) | $setbits]
++	mww $reg $new
++}
++
++add_usage_text mmw "address setbits clearbits"
++add_help_text mmw "Modify word in memory. new_val = (old_val & ~clearbits) | setbits;"
+diff --git a/tools/OpenOCD/memory.tcl b/tools/OpenOCD/memory.tcl
+new file mode 100644
+index 0000000..2719d3f
+--- /dev/null
++++ b/tools/OpenOCD/memory.tcl
+@@ -0,0 +1,133 @@
++# MEMORY
++#
++# All Memory regions have two components.
++#    (1) A count of regions, in the form N_NAME
++#    (2) An array within info about each region.
++#
++# The ARRAY
++#
++#       <NAME>(  RegionNumber ,  ATTRIBUTE )
++#
++# Where <NAME> is one of:
++#
++#     N_FLASH  & FLASH   (internal memory)
++#     N_RAM    & RAM     (internal memory)
++#     N_MMREGS & MMREGS  (for memory mapped registers)
++#     N_XMEM   & XMEM    (off chip memory, ie: flash on cs0, sdram on cs2)
++# or  N_UNKNOWN & UNKNOWN for things that do not exist.
++#
++# We have 1 unknown region.
++set N_UNKNOWN 1
++# All MEMORY regions must have these attributes
++#     CS          - chip select (if internal, use -1)
++set UNKNOWN(0,CHIPSELECT) -1
++#     BASE        - base address in memory
++set UNKNOWN(0,BASE)       0
++#     LEN         - length in bytes
++set UNKNOWN(0,LEN)        $CPU_MAX_ADDRESS
++#     HUMAN       - human name of the region
++set UNKNOWN(0,HUMAN) "unknown"
++#     TYPE        - one of:
++#                       flash, ram, mmr, unknown
++#                    For harvard arch:
++#                       iflash, dflash, iram, dram
++set UNKNOWN(0,TYPE)       "unknown"
++#     RWX         - access ablity
++#                       unix style chmod bits
++#                           0 - no access
++#                           1 - execute
++#                           2 - write
++#                           4 - read
++#                       hence: 7 - readwrite execute
++set RWX_NO_ACCESS     0
++set RWX_X_ONLY        $BIT0
++set RWX_W_ONLY        $BIT1
++set RWX_R_ONLY        $BIT2
++set RWX_RW            [expr $RWX_R_ONLY + $RWX_W_ONLY]
++set RWX_R_X           [expr $RWX_R_ONLY + $RWX_X_ONLY]
++set RWX_RWX           [expr $RWX_R_ONLY + $RWX_W_ONLY + $RWX_X_ONLY]
++set UNKNOWN(0,RWX)     $RWX_NO_ACCESS
++
++#     WIDTH       - access width
++#                      8,16,32 [0 means ANY]
++set ACCESS_WIDTH_NONE 0
++set ACCESS_WIDTH_8    $BIT0
++set ACCESS_WIDTH_16   $BIT1
++set ACCESS_WIDTH_32   $BIT2
++set ACCESS_WIDTH_ANY  [expr $ACCESS_WIDTH_8 + $ACCESS_WIDTH_16 + $ACCESS_WIDTH_32]
++set UNKNOWN(0,ACCESS_WIDTH) $ACCESS_WIDTH_NONE
++
++proc iswithin { ADDRESS BASE LEN } {
++    return [expr ((($ADDRESS - $BASE) > 0) && (($ADDRESS - $BASE + $LEN) > 0))]
++}
++
++proc address_info { ADDRESS } {
++
++    foreach WHERE { FLASH RAM MMREGS XMEM UNKNOWN } {
++	if { info exists $WHERE } {
++	    set lmt [set N_[set WHERE]]
++	    for { set region 0 } { $region < $lmt } { incr region } {
++		if { iswithin $ADDRESS $WHERE($region,BASE) $WHERE($region,LEN) } {
++		    return  "$WHERE $region";
++		}
++	    }
++	}
++    }
++
++    # Return the 'unknown'
++    return "UNKNOWN 0"
++}
++
++proc memread32 {ADDR} {
++    set foo(0) 0
++    if ![ catch { mem2array foo 32 $ADDR 1  } msg ] {
++	return $foo(0)
++    } else {
++	error "memread32: $msg"
++    }
++}
++
++proc memread16 {ADDR} {
++    set foo(0) 0
++    if ![ catch { mem2array foo 16 $ADDR 1  } msg ] {
++	return $foo(0)
++    } else {
++	error "memread16: $msg"
++    }
++}
++
++proc memread8 {ADDR} {
++    set foo(0) 0
++    if ![ catch { mem2array foo 8 $ADDR 1  } msg ] {
++	return $foo(0)
++    } else {
++	error "memread8: $msg"
++    }
++}
++
++proc memwrite32 {ADDR DATA} {
++    set foo(0) $DATA
++    if ![ catch { array2mem foo 32 $ADDR 1  } msg ] {
++	return $foo(0)
++    } else {
++	error "memwrite32: $msg"
++    }
++}
++
++proc memwrite16 {ADDR DATA} {
++    set foo(0) $DATA
++    if ![ catch { array2mem foo 16 $ADDR 1  } msg ] {
++	return $foo(0)
++    } else {
++	error "memwrite16: $msg"
++    }
++}
++
++proc memwrite8 {ADDR DATA} {
++    set foo(0) $DATA
++    if ![ catch { array2mem foo 8 $ADDR 1  } msg ] {
++	return $foo(0)
++    } else {
++	error "memwrite8: $msg"
++    }
++}
+diff --git a/tools/OpenOCD/mmr_helpers.tcl b/tools/OpenOCD/mmr_helpers.tcl
+new file mode 100644
+index 0000000..ce116e4
+--- /dev/null
++++ b/tools/OpenOCD/mmr_helpers.tcl
+@@ -0,0 +1,72 @@
++
++proc proc_exists { NAME } {
++    set n [info commands $NAME]
++    set l [string length $n]
++    return [expr $l != 0]
++}
++
++# Give: REGISTER name - must be a global variable.
++proc show_mmr32_reg { NAME } {
++
++    global $NAME
++    # we want $($NAME)
++    set a [set [set NAME]]
++
++    if ![catch { set v [memread32 $a] } msg ] {
++	echo [format "%15s: (0x%08x): 0x%08x" $NAME $a $v]
++
++	# Was a helper defined?
++	set fn show_${NAME}_helper
++	if [ proc_exists $fn ] {
++	    # Then call it
++	    $fn $NAME $a $v
++	}
++	return $v;
++    } else {
++	error [format "%s (%s)" $msg $NAME ]
++    }
++}
++
++
++# Give: NAMES - an array of names accessable
++#               in the callers symbol-scope.
++#       VAL - the bits to display.
++
++proc show_mmr32_bits { NAMES VAL } {
++
++    upvar $NAMES MYNAMES
++
++    set w 5
++    foreach {IDX N} $MYNAMES {
++	set l [string length $N]
++	if { $l > $w } { set w $l }
++    }
++
++    for { set x 24 } { $x >= 0 } { incr x -8 } {
++	echo -n "  "
++	for { set y 7 } { $y >= 0 } { incr y -1 } {
++	    set s $MYNAMES([expr $x + $y])
++	    echo -n [format "%2d: %-*s | " [expr $x + $y] $w $s ]
++	}
++	echo ""
++
++	echo -n "  "
++	for { set y 7 } { $y >= 0 } { incr y -1 } {
++	    echo -n [format "    %d%*s | " [expr !!($VAL & (1 << ($x + $y)))] [expr $w -1] ""]
++	}
++	echo ""
++    }
++}
++
++
++proc show_mmr_bitfield { MSB LSB VAL FIELDNAME FIELDVALUES } {
++    set width [expr (($MSB - $LSB + 1) + 7) / 4]
++    set nval [show_normalize_bitfield $VAL $MSB $LSB ]
++    set name0 [lindex $FIELDVALUES 0 ]
++    if [ string compare $name0 _NUMBER_ ] {
++	set sval [lindex $FIELDVALUES $nval]
++    } else {
++	set sval ""
++    }
++    echo [format "%-15s: %d (0x%0*x) %s" $FIELDNAME $nval $width $nval $sval ]
++}
+diff --git a/tools/OpenOCD/stlink-v2-1.cfg b/tools/OpenOCD/stlink-v2-1.cfg
+new file mode 100644
+index 0000000..093e801
+--- /dev/null
++++ b/tools/OpenOCD/stlink-v2-1.cfg
+@@ -0,0 +1,16 @@
++#
++# STMicroelectronics ST-LINK/V2-1 in-circuit debugger/programmer
++#
++
++interface hla
++hla_layout stlink
++hla_device_desc "ST-LINK/V2-1"
++hla_vid_pid 0x0483 0x374b
++
++# Optionally specify the serial number of ST-LINK/V2 usb device.  ST-LINK/V2
++# devices seem to have serial numbers with unreadable characters.  ST-LINK/V2
++# firmware version >= V2.J21.S4 recommended to avoid issues with adapter serial
++# number reset issues.
++# eg.
++#hla_serial "\xaa\xbc\x6e\x06\x50\x75\xff\x55\x17\x42\x19\x3f"
++
+diff --git a/tools/OpenOCD/stlink-v2.cfg b/tools/OpenOCD/stlink-v2.cfg
+new file mode 100644
+index 0000000..ae545a1
+--- /dev/null
++++ b/tools/OpenOCD/stlink-v2.cfg
+@@ -0,0 +1,16 @@
++#
++# STMicroelectronics ST-LINK/V2 in-circuit debugger/programmer
++#
++
++interface hla
++hla_layout stlink
++hla_device_desc "ST-LINK/V2"
++hla_vid_pid 0x0483 0x3748
++
++# Optionally specify the serial number of ST-LINK/V2 usb device.  ST-LINK/V2
++# devices seem to have serial numbers with unreadable characters.  ST-LINK/V2
++# firmware version >= V2.J21.S4 recommended to avoid issues with adapter serial
++# number reset issues.
++# eg.
++#hla_serial "\xaa\xbc\x6e\x06\x50\x75\xff\x55\x17\x42\x19\x3f"
++
+diff --git a/tools/OpenOCD/stm32f2x-flash-app.cfg b/tools/OpenOCD/stm32f2x-flash-app.cfg
+index 9d25856..3bea167 100644
+--- a/tools/OpenOCD/stm32f2x-flash-app.cfg
++++ b/tools/OpenOCD/stm32f2x-flash-app.cfg
+@@ -8,3 +8,4 @@
+ # written permission of Broadcom Corporation.
+ #
+ init
++reset halt
+diff --git a/tools/OpenOCD/stm32f2x.cfg b/tools/OpenOCD/stm32f2x.cfg
+index 70de285..79777f0 100644
+--- a/tools/OpenOCD/stm32f2x.cfg
++++ b/tools/OpenOCD/stm32f2x.cfg
+@@ -8,6 +8,8 @@
+ # written permission of Broadcom Corporation.
+ #
+ # script for stm32f2xxx
++source [find tools/OpenOCD/swj-dp.tcl]
++source [find tools/OpenOCD/mem_helper.tcl]
+ 
+ set CHIP_FLASH_START 0x08000000
+ set CHIP_RAM_START   0x20000000
+@@ -42,17 +44,23 @@ if { [info exists WORKAREASIZE] } {
+ adapter_khz 1000
+ 
+ adapter_nsrst_delay 100
++if {[using_jtag]} {
+ jtag_ntrst_delay 100
++}
+ 
+ #jtag scan chain
+ if { [info exists CPUTAPID ] } {
+    set _CPUTAPID $CPUTAPID
+ } else {
++  if { [using_jtag] } {
+   # See STM Document RM0033
+   # Section 32.6.3 - corresponds to Cortex-M3 r2p0
+    set _CPUTAPID 0x4ba00477
++  } else {
++   set _CPUTAPID 0x2ba01477
++  }
+ }
+-jtag newtap $_CHIPNAME cpu -irlen 4 -ircapture 0x1 -irmask 0xf -expected-id $_CPUTAPID
++swj_newdap $_CHIPNAME cpu -irlen 4 -ircapture 0x1 -irmask 0xf -expected-id $_CPUTAPID
+ 
+ if { [info exists BSTAPID ] } {
+    set _BSTAPID $BSTAPID
+@@ -62,44 +70,35 @@ if { [info exists BSTAPID ] } {
+   #
+   set _BSTAPID 0x06411041
+ }
+-jtag newtap $_CHIPNAME bs -irlen 5 -expected-id $_BSTAPID
+ 
+-set _TARGETNAME $_CHIPNAME.cpu
+-target create $_TARGETNAME cortex_m3 -endian $_ENDIAN -chain-position $_TARGETNAME
++if { [using_jtag] } {
++  swj_newdap $_CHIPNAME bs -irlen 5 -expected-id $_BSTAPID
++}
+ 
+-$_TARGETNAME configure -work-area-phys $CHIP_RAM_START -work-area-size $_WORKAREASIZE -work-area-backup 0 -rtos auto -rtos-wipe
++set _TARGETNAME $_CHIPNAME.cpu
++target create $_TARGETNAME cortex_m -endian $_ENDIAN -chain-position $_TARGETNAME
+ 
+-#shutdown OpenOCD daemon when gdb detaches
+-$_TARGETNAME configure -event gdb-detach { mww 0xE0042008 0x00000000; soft_reset_halt; sleep 5; resume; shutdown }
++$_TARGETNAME configure -work-area-phys 0x20000000 -work-area-size $_WORKAREASIZE -work-area-backup 0
+ 
+ set _FLASHNAME $_CHIPNAME.flash
+ flash bank $_FLASHNAME stm32f2x 0 0 0 0 $_TARGETNAME
+ 
+-# if srst is not fitted use SYSRESETREQ to
+-# perform a soft reset
+-#cortex_m3 reset_config srst
+-
+-
+-proc jtag_init {} {
+-    global _TARGETNAME
+-
+-    # assert both resets; equivalent to power-on reset
+-    jtag_reset 1 1
+-    sleep 1
+-    jtag_reset 0 1
+-
+-    # Examine scanchain
+-    jtag arp_init
+-
+-    $_TARGETNAME arp_examine
+-
+-    # Force STM32 to allow debugging whilst sleeping and in stop-mode
+-    mww 0xE0042004 3
++if { ![using_hla] } {
++  cortex_m reset_config sysresetreq
++}
+ 
+-    # Set flags to cause timer based peripherals to stop during breakpoints.
+-    mww 0xE0042008 0xffffffff
+ 
++$_TARGETNAME configure -event examine-end {
++   # DBGMCU_CR |= DBG_STANDBY | DBG_STOP | DBG_SLEEP
++   mmw 0xE0042004 0x00000007 0
++   # Stop watchdog counters during halt
++   # DBGMCU_APB1_FZ = DBG_IWDG_STOP | DBG_WWDG_STOP
++   mww 0xE0042008 0x00001800
++}
+ 
+-    reset halt
+-    poll on
++$_TARGETNAME configure -event trace-config {
++   # Set TRACE_IOEN; TRACE_MODE is set to async; when using sync
++   # change this value accordingly to configure trace pins
++   # assignment
++   mmw 0xE0042004 0x00000020 0
+ }
+diff --git a/tools/OpenOCD/swj-dp.tcl b/tools/OpenOCD/swj-dp.tcl
+new file mode 100644
+index 0000000..1d274cb
+--- /dev/null
++++ b/tools/OpenOCD/swj-dp.tcl
+@@ -0,0 +1,34 @@
++# ARM Debug Interface V5 (ADI_V5) utility
++# ... Mostly for SWJ-DP (not SW-DP or JTAG-DP, since
++# SW-DP and JTAG-DP targets don't need to switch based
++# on which transport is active.
++#
++# declare a JTAG or SWD Debug Access Point (DAP)
++# based on the transport in use with this session.
++# You can't access JTAG ops when SWD is active, etc.
++
++# params are currently what "jtag newtap" uses
++# because OpenOCD internals are still strongly biased
++# to JTAG ....  but for SWD, "irlen" etc are ignored,
++# and the internals work differently
++
++# for now, ignore non-JTAG and non-SWD transports
++# (e.g. initial flash programming via SPI or UART)
++
++# split out "chip" and "tag" so we can someday handle
++# them more uniformly irlen too...)
++
++if [catch {transport select}] {
++  echo "Error: unable to select a session transport. Can't continue."
++  shutdown
++}
++
++proc swj_newdap {chip tag args} {
++ if [using_hla] {
++     eval hla newtap $chip $tag $args
++ } elseif [using_jtag] {
++     eval jtag newtap $chip $tag $args
++ } elseif [using_swd] {
++     eval swd newdap $chip $tag $args
++ }
++}
+-- 
+2.3.8 (Apple Git-58)
+
