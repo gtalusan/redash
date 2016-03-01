@@ -19,7 +19,7 @@ GPIO table in [maximus64](https://github.com/maximus64/amazon-dash-wiced)'s `pla
 
 ## To Do
 
-* I2S microphone
+* I2S microphone (see staging directory for WIP)
 
 ## Building
 
